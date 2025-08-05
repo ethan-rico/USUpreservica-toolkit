@@ -2,7 +2,7 @@
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QPushButton, QTreeWidget, QTreeWidgetItem,
-    QHBoxLayout, QFileDialog, QInputDialog, QMessageBox
+    QHBoxLayout, QFileDialog, QInputDialog, QStatusBar, QMessageBox
 )
 from PyQt6.QtCore import Qt
 from backend.preservica_client import PreservicaClient
@@ -40,6 +40,10 @@ class BrowserTab(QWidget):
 
         # Load starting folder
         self.ask_for_starting_folder()
+
+        # Load status bar when moving
+        self.status_bar = QStatusBar()
+        self.layout.addWidget(self.status_bar)
 
     def ask_for_starting_folder(self):
         ref_id, ok = QInputDialog.getText(self, "Start Folder", "Enter folder reference ID:")
@@ -180,7 +184,7 @@ class BrowserTab(QWidget):
     def move_selected_assets(self):
         selected_items = self.tree.selectedItems()
         if not selected_items:
-            QMessageBox.warning(self, "No Selection", "Please select one or more assets to move.")
+            QMessageBox.warning(self, "No Selection", "Please select one or more assets or folders to move.")
             return
 
         destination_ref, ok = QInputDialog.getText(self, "Destination Folder", "Enter destination folder reference ID:")
@@ -188,7 +192,7 @@ class BrowserTab(QWidget):
             return
         destination_ref = destination_ref.strip()
 
-        # Validate destination folder
+        # Validate destination folder exists
         try:
             destination_folder = self.client.folder(destination_ref)
         except Exception as e:
@@ -197,26 +201,43 @@ class BrowserTab(QWidget):
 
         moved = 0
         skipped = []
+        moved_items = []
 
-        for item in selected_items:
+        total = len(selected_items)
+        for idx, item in enumerate(selected_items, 1):
             ref = item.data(0, Qt.ItemDataRole.UserRole)
             ref_type = item.data(0, Qt.ItemDataRole.UserRole + 1)
 
-            if not ref or ref_type != "ASSET":
-                skipped.append(ref)
-                continue
+            self.status_bar.showMessage(f"Moving item {idx}/{total}...")
 
             try:
-                asset = self.client.asset(ref)
-                self.client.move(asset, destination_folder)  # <-- Correct method
+                if ref_type == "ASSET":
+                    entity = self.client.asset(ref)
+                elif ref_type == "FOLDER":
+                    entity = self.client.folder(ref)
+                else:
+                    raise ValueError("Unknown entity type")
+
+                self.client.move(entity, destination_folder)
                 moved += 1
+                moved_items.append(item)
             except Exception as e:
+                print(f"[WARNING] Failed to move {ref}: {e}")
                 skipped.append(ref)
 
-        msg = f"Moved {moved} asset(s) to folder: {destination_folder.title} ({destination_folder.reference})"
-        if skipped:
-            msg += f"\n\nSkipped {len(skipped)} item(s) (likely not assets)."
+        # Remove all moved items from the tree after all done
+        for item in moved_items:
+            parent = item.parent()
+            if parent:
+                parent.removeChild(item)
+            else:
+                index = self.tree.indexOfTopLevelItem(item)
+                self.tree.takeTopLevelItem(index)
 
+        msg = f"Moved {moved} item(s) to folder: {destination_folder.title} ({destination_folder.reference})"
+        if skipped:
+            msg += f"\n\nSkipped {len(skipped)} item(s)."
+
+        self.status_bar.showMessage("Move complete.", 5000)
         QMessageBox.information(self, "Move Complete", msg)
         self.tree.clearSelection()
-
