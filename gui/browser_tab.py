@@ -13,9 +13,11 @@ from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 
 class BrowserTab(QWidget):
-    def __init__(self):
+    def __init__(self, export_tab, move_tab, client):
         super().__init__()
-        self.client = PreservicaClient().client
+        self.export_tab = export_tab
+        self.move_tab = move_tab
+        self.client = client
 
         self.layout = QVBoxLayout()
         self.setLayout(self.layout)
@@ -100,144 +102,46 @@ class BrowserTab(QWidget):
             QMessageBox.warning(self, "No Selection", "Please select one or more items to export.")
             return
 
+        refs = []
+        for item in selected_items:
+            ref = item.data(0, Qt.ItemDataRole.UserRole)
+            if ref:
+                refs.append(ref)
+
+        # Ask for export path
         export_path, _ = QFileDialog.getSaveFileName(self, "Save Metadata", filter="Excel Files (*.xlsx)")
         if not export_path:
             return
         if not export_path.endswith(".xlsx"):
             export_path += ".xlsx"
 
-        rows = []
-        fieldnames = {"reference", "title", "type", "qdc_xml"}
+        # Start the export via ExportTab
+        self.export_tab.start_export_with_refs(refs, export_path)
 
-        for item in selected_items:
-            ref = item.data(0, Qt.ItemDataRole.UserRole)
-            if not ref:
-                continue
 
-            # Try to load asset or folder
-            try:
-                entity = self.client.asset(ref)
-                etype = "ASSET"
-            except Exception:
-                try:
-                    entity = self.client.folder(ref)
-                    etype = "FOLDER"
-                except Exception:
-                    continue  # skip invalid refs
-
-            row = {
-                "reference": entity.reference,
-                "title": entity.title,
-                "type": etype,
-                "qdc_xml": ""
-            }
-
-            for url, schema in (entity.metadata or {}).items():
-                if "dc" in schema.lower():
-                    try:
-                        xml = self.client.metadata(url).strip()
-                        row["qdc_xml"] = xml
-                        root = ET.fromstring(xml)
-                        ns = {
-                            "dc": "http://purl.org/dc/elements/1.1/",
-                            "dcterms": "http://purl.org/dc/terms/"
-                        }
-                        counts = {}
-                        for prefix in ns:
-                            for elem in root.findall(f".//{{{ns[prefix]}}}*"):
-                                tag = elem.tag.split("}")[-1]
-                                value = (elem.text or "").strip()
-                                if not value:
-                                    continue
-                                base = f"dc:{tag}"
-                                count = counts.get(base, 0)
-                                col = base if count == 0 else f"{base}.{count}"
-                                row[col] = value
-                                fieldnames.add(col)
-                                counts[base] = count + 1
-                    except ET.ParseError:
-                        continue
-
-            rows.append(row)
-
-        # Write to Excel
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.title = "Metadata"
-
-        headers = sorted(fieldnames - {"reference", "title", "type"})
-        final_headers = ["reference", "title", "type"] + headers
-        ws.append(final_headers)
-
-        for i, header in enumerate(final_headers, 1):
-            col_letter = get_column_letter(i)
-            ws[f"{col_letter}1"].font = Font(bold=True)
-
-        for row_data in rows:
-            row = [row_data.get(h, "") for h in final_headers]
-            ws.append(row)
-
-        wb.save(export_path)
-
-        QMessageBox.information(self, "Export Complete", f"Metadata exported to:\n{export_path}")
 
     def move_selected_assets(self):
-        selected_items = self.tree.selectedItems()
-        if not selected_items:
+        selected_refs = [
+            item.data(0, Qt.ItemDataRole.UserRole)
+            for item in self.tree.selectedItems()
+            if item.data(0, Qt.ItemDataRole.UserRole)
+        ]
+
+        if not selected_refs:
             QMessageBox.warning(self, "No Selection", "Please select one or more assets or folders to move.")
             return
 
         destination_ref, ok = QInputDialog.getText(self, "Destination Folder", "Enter destination folder reference ID:")
         if not ok or not destination_ref.strip():
             return
+
         destination_ref = destination_ref.strip()
 
-        # Validate destination folder exists
-        try:
-            destination_folder = self.client.folder(destination_ref)
-        except Exception as e:
-            QMessageBox.critical(self, "Invalid Destination", f"Could not find folder:\n{e}")
-            return
+        # Switch to Move tab and start move
+        self.parentWidget().parentWidget().setCurrentIndex(2)  # index of Move tab in QTabWidget
+        self.move_tab.move_items(selected_refs, destination_ref)
 
-        moved = 0
-        skipped = []
-        moved_items = []
 
-        total = len(selected_items)
-        for idx, item in enumerate(selected_items, 1):
-            ref = item.data(0, Qt.ItemDataRole.UserRole)
-            ref_type = item.data(0, Qt.ItemDataRole.UserRole + 1)
-
-            self.status_bar.showMessage(f"Moving item {idx}/{total}...")
-
-            try:
-                if ref_type == "ASSET":
-                    entity = self.client.asset(ref)
-                elif ref_type == "FOLDER":
-                    entity = self.client.folder(ref)
-                else:
-                    raise ValueError("Unknown entity type")
-
-                self.client.move(entity, destination_folder)
-                moved += 1
-                moved_items.append(item)
-            except Exception as e:
-                print(f"[WARNING] Failed to move {ref}: {e}")
-                skipped.append(ref)
-
-        # Remove all moved items from the tree after all done
-        for item in moved_items:
-            parent = item.parent()
-            if parent:
-                parent.removeChild(item)
-            else:
-                index = self.tree.indexOfTopLevelItem(item)
-                self.tree.takeTopLevelItem(index)
-
-        msg = f"Moved {moved} item(s) to folder: {destination_folder.title} ({destination_folder.reference})"
-        if skipped:
-            msg += f"\n\nSkipped {len(skipped)} item(s)."
-
-        self.status_bar.showMessage("Move complete.", 5000)
-        QMessageBox.information(self, "Move Complete", msg)
-        self.tree.clearSelection()
+        def set_tabs(self, export_tab, move_tab):
+            self.export_tab = export_tab
+            self.move_tab = move_tab
