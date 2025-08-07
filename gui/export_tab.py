@@ -1,8 +1,6 @@
-# gui/export_tab.py
-
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QPushButton, QProgressBar,
-    QFileDialog, QMessageBox
+    QFileDialog, QMessageBox, QInputDialog
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from backend.preservica_client import PreservicaClient
@@ -11,6 +9,7 @@ import xml.etree.ElementTree as ET
 import openpyxl
 from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
+
 
 class ExportWorker(QThread):
     progress = pyqtSignal(int)
@@ -103,7 +102,7 @@ class ExportTab(QWidget):
         self.layout = QVBoxLayout()
         self.setLayout(self.layout)
 
-        self.status_label = QLabel("Select assets or folders to export metadata.")
+        self.status_label = QLabel("Select assets or folders to export metadata, or enter a folder reference below.")
         self.layout.addWidget(self.status_label)
 
         self.progress_bar = QProgressBar()
@@ -112,12 +111,15 @@ class ExportTab(QWidget):
         self.progress_bar.setValue(0)
         self.layout.addWidget(self.progress_bar)
 
-        self.export_button = QPushButton("Start Export")
+        self.export_button = QPushButton("Start Export (From Selection)")
         self.export_button.clicked.connect(self.start_export)
         self.layout.addWidget(self.export_button)
 
-        self.ref_list = []
+        self.export_by_ref_button = QPushButton("Export Folder by Reference")
+        self.export_by_ref_button.clicked.connect(self.export_folder_by_reference)
+        self.layout.addWidget(self.export_by_ref_button)
 
+        self.ref_list = []
         self.worker = None
 
     def start_export(self):
@@ -132,6 +134,30 @@ class ExportTab(QWidget):
             export_path += ".xlsx"
 
         self.start_export_with_refs(self.ref_list, export_path)
+
+    def export_folder_by_reference(self):
+        folder_ref, ok = QInputDialog.getText(self, "Folder Reference", "Enter the folder reference ID:")
+        if not ok or not folder_ref.strip():
+            return
+
+        try:
+            folder = self.client.folder(folder_ref.strip())
+            descendants = list(self.client.descendants(folder))
+            asset_refs = [e.reference for e in descendants if isinstance(e, pyp.Asset)]
+            if not asset_refs:
+                QMessageBox.information(self, "No Assets", "No assets found in the specified folder.")
+                return
+
+            export_path, _ = QFileDialog.getSaveFileName(self, "Save Metadata", filter="Excel Files (*.xlsx)")
+            if not export_path:
+                return
+            if not export_path.endswith(".xlsx"):
+                export_path += ".xlsx"
+
+            self.start_export_with_refs(asset_refs, export_path)
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to export from folder: {e}")
 
     def start_export_with_refs(self, ref_list, export_path):
         self.ref_list = ref_list

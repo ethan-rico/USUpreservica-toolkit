@@ -1,127 +1,182 @@
-# gui/update_tab.py
-
+import threading
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QLabel, QPushButton,
-    QProgressBar, QFileDialog, QMessageBox
+    QWidget, QVBoxLayout, QLabel, QPushButton, QTableWidget,
+    QTableWidgetItem, QFileDialog, QMessageBox, QProgressBar
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from backend.preservica_client import PreservicaClient
-import openpyxl
-import xml.etree.ElementTree as ET
-from xml.dom import minidom
-import pyPreservica as pyp
+from backend.metadata_diff import parse_csv, generate_diffs
+from backend.metadata_updater import update_asset_metadata
 
 
 class UpdateWorker(QThread):
     progress = pyqtSignal(int)
-    finished = pyqtSignal(int, int)
+    finished = pyqtSignal(int)
+    cancelled = pyqtSignal()
 
-    def __init__(self, client, file_path):
+    def __init__(self, client, diffs):
         super().__init__()
         self.client = client
-        self.file_path = file_path
+        self.diffs = diffs
+        self._cancel = False
 
     def run(self):
-        try:
-            wb = openpyxl.load_workbook(self.file_path)
-            ws = wb.active
-        except Exception:
-            self.finished.emit(0, 0)
-            return
-
-        headers = [cell.value for cell in ws[1]]
-        total = ws.max_row - 1
+        total = len(self.diffs)
         updated = 0
-        skipped = 0
 
-        for i, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=1):
-            data = dict(zip(headers, row))
-            ref = data.get("reference")
-            entity_type = data.get("type")
-
-            if not ref or not entity_type:
-                skipped += 1
-                continue
+        for i, diff in enumerate(self.diffs, 1):
+            if self._cancel:
+                self.cancelled.emit()
+                return
 
             try:
-                entity = (
-                    self.client.asset(ref)
-                    if entity_type == "ASSET"
-                    else self.client.folder(ref)
-                )
-            except Exception:
-                skipped += 1
-                continue
-
-            # Build new QDC XML
-            root = ET.Element("oai_qdc:qualifieddc", {
-                "xmlns:oai_qdc": "http://www.openarchives.org/OAI/2.0/oai_qdc/",
-                "xmlns:dc": "http://purl.org/dc/elements/1.1/",
-                "xmlns:dcterms": "http://purl.org/dc/terms/"
-            })
-
-            for key, value in data.items():
-                if key.startswith("dc:") and value:
-                    tag_parts = key.split(":")
-                    if len(tag_parts) > 1:
-                        base_tag = tag_parts[1].split(".")[0]
-                        if base_tag:
-                            if "." in key:
-                                # Allow for multiple same tags like dc:subject.0, dc:subject.1
-                                base_tag = base_tag
-                            if "dcterms:" in key:
-                                sub_el = ET.SubElement(root, f"{{http://purl.org/dc/terms/}}{base_tag}")
-                            else:
-                                sub_el = ET.SubElement(root, f"{{http://purl.org/dc/elements/1.1/}}{base_tag}")
-                            sub_el.text = str(value)
-
-            raw_xml = ET.tostring(root, encoding="utf-8")
-            pretty_xml = minidom.parseString(raw_xml).toprettyxml(indent="  ")
-
-            try:
-                self.client.update_metadata(ref, "http://purl.org/dc/terms/", pretty_xml)
+                update_asset_metadata(self.client, diff["reference"], diff["csv_row"])
                 updated += 1
             except Exception:
-                skipped += 1
+                pass
 
-            self.progress.emit(int((i / total) * 100))
+            self.progress.emit(int(i / total * 100))
 
-        self.finished.emit(updated, skipped)
+        self.finished.emit(updated)
+
+    def cancel(self):
+        self._cancel = True
 
 
 class UpdateTab(QWidget):
+    preview_ready = pyqtSignal(list)
+
     def __init__(self, client):
         super().__init__()
         self.client = client
+        self.diffs = []
+        self.file_path = None
+        self.csv_rows = []
+        self.worker = None
+
         self.layout = QVBoxLayout()
         self.setLayout(self.layout)
 
-        self.info_label = QLabel("Select an Excel file with updated metadata to apply to Preservica assets.")
-        self.layout.addWidget(self.info_label)
+        self.status_label = QLabel("Load a CSV or Excel file to update metadata.")
+        self.layout.addWidget(self.status_label)
 
-        self.update_button = QPushButton("Update Metadata from .xlsx File")
-        self.update_button.clicked.connect(self.handle_update)
+        self.load_button = QPushButton("Load Metadata File")
+        self.load_button.clicked.connect(self.load_file)
+        self.layout.addWidget(self.load_button)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(["Reference", "Field", "New Value"])
+        self.layout.addWidget(self.table)
+
+        self.update_button = QPushButton("Update Metadata")
+        self.update_button.setEnabled(False)
+        self.update_button.clicked.connect(self.update_metadata)
         self.layout.addWidget(self.update_button)
+
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.clicked.connect(self.cancel_update)
+        self.layout.addWidget(self.cancel_button)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setMinimum(0)
         self.progress_bar.setMaximum(100)
-        self.progress_bar.setValue(0)
         self.layout.addWidget(self.progress_bar)
 
-    def handle_update(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "Select Excel File", filter="Excel Files (*.xlsx)")
+        self.preview_ready.connect(self.show_preview)
+
+    def load_file(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Metadata File",
+            filter="Metadata Files (*.csv *.xlsx);;CSV Files (*.csv);;Excel Files (*.xlsx)"
+        )
         if not file_path:
             return
 
+        try:
+            rows = parse_csv(file_path)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to parse file:\n{e}")
+            return
+
+        self.file_path = file_path
+        self.csv_rows = rows
+        self.preview_diffs(rows[:10])  # Only preview first 10
+
+    def preview_diffs(self, preview_rows):
+        self.status_label.setText("Checking for metadata differences...")
+
+        def run_preview():
+            partial_diffs = generate_diffs(self.client, preview_rows)
+            changed = [d for d in partial_diffs if d["changes"]]
+            self.preview_ready.emit(changed)
+
+        thread = threading.Thread(target=run_preview)
+        thread.start()
+
+    def show_preview(self, changed):
+        if not changed:
+            QMessageBox.information(self, "No Changes", "No metadata differences found.")
+            self.table.setRowCount(0)
+            self.update_button.setEnabled(False)
+            self.status_label.setText("No metadata differences found.")
+            return
+
+        self.populate_preview_table(changed)
+        self.update_button.setEnabled(True)
+        self.status_label.setText("Previewing changes. Click update to apply to all items.")
+
+    def populate_preview_table(self, preview_diffs):
+        self.table.setRowCount(0)
+        rows = []
+        for diff in preview_diffs:
+            ref = diff["reference"]
+            for field, (_, new_val) in diff["changes"].items():
+                rows.append((ref, field, new_val))
+
+        self.table.setRowCount(len(rows))
+        for row_idx, (ref, field, val) in enumerate(rows):
+            self.table.setItem(row_idx, 0, QTableWidgetItem(ref))
+            self.table.setItem(row_idx, 1, QTableWidgetItem(field))
+            self.table.setItem(row_idx, 2, QTableWidgetItem(val))
+
+    def update_metadata(self):
+        if not self.csv_rows:
+            return
+
+        self.status_label.setText("Processing all changes...")
+        self.update_button.setEnabled(False)
+        self.cancel_button.setEnabled(True)
+        self.table.setRowCount(0)
         self.progress_bar.setValue(0)
-        self.worker = UpdateWorker(self.client, file_path)
+
+        def full_diff():
+            all_diffs = generate_diffs(self.client, self.csv_rows)
+            changed = [d for d in all_diffs if d["changes"]]
+            self.run_update_worker(changed)
+
+        threading.Thread(target=full_diff).start()
+
+    def run_update_worker(self, diffs):
+        self.worker = UpdateWorker(self.client, diffs)
         self.worker.progress.connect(self.progress_bar.setValue)
-        self.worker.finished.connect(self.show_results)
+        self.worker.finished.connect(self.update_complete)
+        self.worker.cancelled.connect(self.update_cancelled)
         self.worker.start()
 
-    def show_results(self, updated, skipped):
-        msg = f"Updated {updated} item(s)."
-        if skipped > 0:
-            msg += f"\nSkipped {skipped} item(s)."
-        QMessageBox.information(self, "Update Complete", msg)
+    def cancel_update(self):
+        if self.worker:
+            self.worker.cancel()
+            self.status_label.setText("Cancelling update...")
+
+    def update_complete(self, updated_count):
+        self.status_label.setText(f"Metadata update complete. {updated_count} items updated.")
+        self.progress_bar.setValue(100)
+        self.cancel_button.setEnabled(False)
+
+    def update_cancelled(self):
+        self.status_label.setText("Update cancelled by user.")
+        self.cancel_button.setEnabled(False)
+        self.progress_bar.setValue(0)
