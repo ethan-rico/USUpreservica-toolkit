@@ -7,6 +7,7 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from backend.preservica_client import PreservicaClient
 from backend.metadata_diff import parse_csv, generate_diffs
 from backend.metadata_updater import update_asset_metadata
+import traceback
 
 
 class UpdateWorker(QThread):
@@ -23,6 +24,7 @@ class UpdateWorker(QThread):
     def run(self):
         total = len(self.diffs)
         updated = 0
+        failed = 0
 
         for i, diff in enumerate(self.diffs, 1):
             if self._cancel:
@@ -30,10 +32,13 @@ class UpdateWorker(QThread):
                 return
 
             try:
-                update_asset_metadata(self.client, diff["reference"], diff["csv_row"])
+                res = update_asset_metadata(self.client, diff["reference"], diff["csv_row"])
+                print(f"Update result for {diff['reference']}: {res}")
                 updated += 1
-            except Exception:
-                pass
+            except Exception as e:
+                failed += 1
+                print(f"Update failed for {diff['reference']}: {e}")
+                traceback.print_exc()
 
             self.progress.emit(int(i / total * 100))
 

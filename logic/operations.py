@@ -42,7 +42,7 @@ def export_metadata_to_excel(client, refs, export_path, progress_callback=None):
                             value = (elem.text or "").strip()
                             if not value:
                                 continue
-                            base = f"dc:{tag}"
+                            base = f"{prefix}:{tag}"
                             count = counts.get(base, 0)
                             col = base if count == 0 else f"{base}.{count}"
                             row[col] = value

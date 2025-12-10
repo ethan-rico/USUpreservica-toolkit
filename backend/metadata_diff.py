@@ -28,7 +28,7 @@ def parse_qdc_xml(xml_text: str) -> Dict[str, str]:
         for prefix, uri in NAMESPACES.items():
             for elem in root.findall(f".//{{{uri}}}*"):
                 tag = elem.tag.split('}')[-1]
-                base_key = f"dc:{tag}"
+                base_key = f"{prefix}:{tag}"
                 counts[base_key] = counts.get(base_key, 0)
                 suffix = "" if counts[base_key] == 0 else f".{counts[base_key]}"
                 key = base_key + suffix
@@ -61,10 +61,19 @@ def compare_metadata(csv_row: Dict[str, str], preservica_meta: Dict[str, str]) -
     """Returns a dict of changed fields with (old, new) values"""
     changes = {}
     for key, new_value in csv_row.items():
-        if key.startswith("dc:"):
+        if not (new_value and str(new_value).strip()):
+            # skip empty cells
+            continue
+
+        # Standard QDC fields (dc:... or dcterms:...)
+        if key.startswith("dc:") or key.startswith("dcterms:"):
             old_value = preservica_meta.get(key, "")
             if (old_value or "").strip() != (new_value or "").strip():
                 changes[key] = (old_value, new_value)
+        # Custom schema header format: schemaURL::elementName
+        elif "::" in key:
+            # We don't fetch custom-schema current values here; treat non-empty CSV cell as a change/add
+            changes[key] = ("", new_value)
     return changes
 
 def generate_diffs(client: EntityAPI, csv_rows: List[Dict[str, str]]) -> List[Dict]:
