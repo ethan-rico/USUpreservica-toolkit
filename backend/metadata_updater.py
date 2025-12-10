@@ -19,11 +19,17 @@ def build_qdc_xml(metadata: Dict[str, str]) -> str:
     try:
         register_namespace('dc', DC_NAMESPACE)
         register_namespace('dcterms', DCTERMS_NAMESPACE)
+        register_namespace('xsi', 'http://www.w3.org/2001/XMLSchema-instance')
     except Exception:
         pass
 
     # Create root element for qdc (no prefix; we'll use explicit namespaced children)
     root = Element(f"{{{DC_NAMESPACE}}}dc")
+    # Include xsi:schemaLocation attribute pointing to the QDC schema so Preservica accepts the block
+    try:
+        root.set('{http://www.w3.org/2001/XMLSchema-instance}schemaLocation', 'https://www.dublincore.org/schemas/xmls/qdc/dc.xsd')
+    except Exception:
+        pass
 
     # Group repeated keys (handles both dc: and dcterms: prefixes)
     grouped = defaultdict(list)

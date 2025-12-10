@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout, QFileDialog, QInputDialog, QStatusBar, QMessageBox,
     QSplitter, QLabel, QTextEdit, QTableWidget, QTableWidgetItem, QApplication
 )
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt
 from backend.preservica_client import PreservicaClient
 from backend.metadata_diff import fetch_current_metadata
 import pyPreservica as pyp
@@ -304,6 +304,187 @@ class BrowserTab(QWidget):
                 QTimer.singleShot(0, lambda: self.thumbnail_label.setText('Preview failed'))
             except Exception:
                 pass
+
+    def _open_current_url(self):
+        if not getattr(self, 'current_preview_url', None):
+            return
+        try:
+            webbrowser.open(self.current_preview_url)
+        except Exception:
+            QMessageBox.warning(self, 'Open Failed', 'Could not open the file URL externally.')
+
+    def _copy_xml_to_clipboard(self):
+        clipboard = QApplication.clipboard()
+        clipboard.setText(self.preview_xml.toPlainText())
+
+    def _refresh_current_preview(self):
+        # re-run selection handler to refresh data
+        self.on_selection_changed()
+
+    def export_metadata_from_selection(self):
+        selected_items = self.tree.selectedItems()
+        if not selected_items:
+            QMessageBox.warning(self, "No Selection", "Please select one or more items to export.")
+            return
+
+        refs = []
+        for item in selected_items:
+            ref = item.data(0, Qt.ItemDataRole.UserRole)
+            if ref:
+                refs.append(ref)
+
+        # Ask for export path
+        export_path, _ = QFileDialog.getSaveFileName(self, "Save Metadata", filter="Excel Files (*.xlsx)")
+        if not export_path:
+            return
+        if not export_path.endswith(".xlsx"):
+            export_path += ".xlsx"
+
+        # Start the export via ExportTab
+        self.export_tab.start_export_with_refs(refs, export_path)
+
+
+
+    def move_selected_assets(self):
+        selected_refs = [
+            item.data(0, Qt.ItemDataRole.UserRole)
+            for item in self.tree.selectedItems()
+            if item.data(0, Qt.ItemDataRole.UserRole)
+        ]
+
+        if not selected_refs:
+            QMessageBox.warning(self, "No Selection", "Please select one or more assets or folders to move.")
+            return
+
+        destination_ref, ok = QInputDialog.getText(self, "Destination Folder", "Enter destination folder reference ID:")
+        if not ok or not destination_ref.strip():
+            return
+
+        destination_ref = destination_ref.strip()
+
+        # Switch to Move tab and start move
+        self.parentWidget().parentWidget().setCurrentIndex(2)  # index of Move tab in QTabWidget
+        self.move_tab.move_items(selected_refs, destination_ref)
+
+
+        def set_tabs(self, export_tab, move_tab):
+            self.export_tab = export_tab
+            self.move_tab = move_tab
+
+        except Exception as e:
+            # show error in XML area and clear meta table
+            self.meta_table.setRowCount(0)
+            self.preview_xml.setPlainText(f"Error loading preview: {e}")
+            try:
+                self.open_button.setEnabled(False)
+            except Exception:
+                pass
+
+    def _fetch_and_set_thumbnail(self, url):
+        try:
+            resp = requests.get(url, timeout=10)
+            if resp.status_code != 200:
+                return
+            img_data = resp.content
+
+            lower = url.lower()
+            # PDF handling: can't render easily — enable open button and show placeholder
+            if lower.endswith('.pdf'):
+                def set_pdf_placeholder():
+                    self.thumbnail_label.setText('PDF (open)')
+                    self.open_button.setEnabled(True)
+                    self.current_preview_url = url
+                QTimer.singleShot(0, set_pdf_placeholder)
+                return
+
+            # Prefer using Pillow to open image data (better TIFF support). Fallback to QPixmap.loadFromData.
+            pix = QPixmap()
+            loaded = False
+            try:
+                image = Image.open(io.BytesIO(img_data))
+                # If multi-frame (e.g., multi-page TIFF), use first frame
+                try:
+                    if getattr(image, 'n_frames', 1) > 1:
+                        image.seek(0)
+                except Exception:
+                    pass
+
+                # Convert to RGBA/RGB for consistent Qt loading
+                if image.mode not in ("RGB", "RGBA"):
+                    image = image.convert("RGBA")
+
+                out = io.BytesIO()
+                image.save(out, format="PNG")
+                png_data = out.getvalue()
+                loaded = pix.loadFromData(png_data)
+            except Exception:
+                # Pillow failed; try QPixmap directly
+                try:
+                    loaded = pix.loadFromData(img_data)
+                except Exception:
+                    loaded = False
+
+            if not loaded or pix.isNull():
+                # failed to load image; provide open button
+                def set_failed():
+                    self.thumbnail_label.setText('Preview not available; open file')
+                    self.open_button.setEnabled(True)
+                    self.current_preview_url = url
+                QTimer.singleShot(0, set_failed)
+                return
+
+            # scale to label size preserving aspect
+            scaled = pix.scaled(self.thumbnail_label.width(), self.thumbnail_label.height(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            def set_pix():
+                self.thumbnail_label.setPixmap(scaled)
+                self.open_button.setEnabled(False)
+                self.current_preview_url = None
+            QTimer.singleShot(0, set_pix)
+        except Exception:
+            try:
+                QTimer.singleShot(0, lambda: self.thumbnail_label.setText('Preview failed'))
+            except Exception:
+                pass
+
+    def _set_thumbnail_from_bytes(self, img_bytes, enable_open=False, url=None):
+        """Set the thumbnail label from raw image bytes (uses Pillow for consistency)."""
+        try:
+            pix = QPixmap()
+            loaded = False
+            try:
+                image = Image.open(io.BytesIO(img_bytes))
+                try:
+                    if getattr(image, 'n_frames', 1) > 1:
+                        image.seek(0)
+                except Exception:
+                    pass
+                if image.mode not in ("RGB", "RGBA"):
+                    image = image.convert("RGBA")
+                out = io.BytesIO()
+                image.save(out, format="PNG")
+                png_data = out.getvalue()
+                loaded = pix.loadFromData(png_data)
+            except Exception:
+                try:
+                    loaded = pix.loadFromData(img_bytes)
+                except Exception:
+                    loaded = False
+
+            if not loaded or pix.isNull():
+                QTimer.singleShot(0, lambda: self.thumbnail_label.setText('Preview not available; open file'))
+                QTimer.singleShot(0, lambda: self.open_button.setEnabled(bool(enable_open)))
+                if url:
+                    self.current_preview_url = url
+                return
+
+            scaled = pix.scaled(self.thumbnail_label.width(), self.thumbnail_label.height(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            def set_pix():
+                self.thumbnail_label.setPixmap(scaled)
+                self.open_button.setEnabled(False)
+                self.current_preview_url = None
+            QTimer.singleShot(0, set_pix)
+        except Exception:
+            QTimer.singleShot(0, lambda: self.thumbnail_label.setText('Preview failed'))
 
     def _open_current_url(self):
         if not getattr(self, 'current_preview_url', None):
