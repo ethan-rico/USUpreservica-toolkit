@@ -2,160 +2,108 @@
 
 A desktop application for managing, exporting, and updating metadata in the USU Preservica system.
 
-This tool was built to simplify bulk metadata workflows using Preservica's API, with a user-friendly interface that includes features like:
+This repo provides a PyQt6 desktop client that wraps `pyPreservica` to support common bulk metadata workflows:
 
-- Exporting metadata to Excel
-- Updating metadata from Excel files
-- Moving assets between folders
-- Authentication with caching
-- Version checking for easy updates
-
----
-
-## Getting Started
-
-Follow these instructions to get up and running on your Windows or Mac computer.
-
-### Step 1: Download the App
-
-Go to the latest release here:
-
-[**Latest Version on GitHub**](https://github.com/ethan-rico/USUpreservica-toolkit/releases/latest)
-
-- Download the file named: `USUpreservicaToolkit.exe` (Windows) or `.app` (Mac — coming soon)
-- Save it somewhere on your computer (e.g., Desktop or Documents)
-
-### Step 2: Run the App
-
-- **Double-click** the downloaded file to launch it
-- On first launch, you might see a security warning — click **"More info" → "Run anyway"** if prompted
-
-### Step 3: Log In to Preservica
-
-- You’ll be asked to enter your Preservica:
-  - **username**
-  - **Password**
-  - **Tenant**
-  - **Server**
-- If you use **two-factor authentication (2FA)**, enter your 2FA secret key as well
-- Your login will be saved securely on your device so you don’t have to enter it every time
+- Export metadata to Excel (.xlsx)
+- Export full inventory to CSV (recursive folder traversal)
+- Update metadata from Excel uploads
+- Move assets between folders
+- Login caching for convenience
 
 ---
 
-## Checking for Updates
+## Quick start (non-developers)
 
-This app checks for updates automatically using GitHub.
+1. Download the latest release from the repository Releases page and run the `USUpreservicaToolkit.exe` (Windows).
+2. On first launch, enter your Preservica credentials (username, password, tenant, server). Optionally provide a 2FA secret key.
+3. Use the UI tabs (`Browser`, `Export`, `Inventory`, `Move`, `Update`) to perform tasks.
 
-If a new version is available, you’ll see a message on launch telling you to download the latest version.
-
----
-
-## 🛠 Features
-
-| Tab          | Description                                                                 |
-|--------------|-----------------------------------------------------------------------------|
-| **Browser**  | Browse and select assets/folders from Preservica                            |
-| **Export**   | Export selected asset metadata (or by folder reference) to `.xlsx` format   |
-| **Update**   | Load an updated `.xlsx` to preview and push metadata changes to Preservica |
-| **Move**     | Move assets to a new folder by providing their references                   |
+Notes for non-developers:
+- The prebuilt `.exe` is the recommended way for non-technical users.
+- If thumbnails don't render for certain assets (PDF/TIFF), use the **Open** action in the preview to view externally.
 
 ---
 
-## Logging Out
+## Inventory feature (new)
 
-To remove your saved credentials:
+Use the **Inventory** tab to export a full inventory CSV for a folder and all its subfolders.
 
-1. Click **File → Log Out**
-2. The app will forget your login and prompt you again next time
+- Enter the parent folder reference ID (e.g. `REF-12345`).
+- Click **Export Inventory** and choose a save location for the CSV.
+- The CSV columns are: `reference`, `dc:title`, `dcterms:identifier`, `dc:identifier`, `filename`.
 
----
+Behavior notes:
+- The worker will attempt to compute a total asset count (uses `client.descendants`) and show a determinate progress bar when possible; otherwise a streaming mode with periodic status updates is used.
+- `filename` is best-effort: first tries `file_name` or `filename` attributes on the asset, then inspects bitstreams for a candidate name.
 
-## Support
-
-If you run into issues or have questions, contact **Ethan Rico** or file an issue on GitHub.
-
----
-
-## 📦 Tech Stack
-
-- [Python](https://www.python.org/)
-- [PyQt6](https://pypi.org/project/PyQt6/)
-- [pyPreservica](https://github.com/adamretter/pyPreservica)
-- [OpenPyXL](https://openpyxl.readthedocs.io/en/stable/)
+If you want a one-off inventory without the GUI, ask me and I can add a small CLI script under `tools/`.
 
 ---
 
-## Updating / Getting the Latest Version (for coworkers)
+## Developer / IT guide
 
-There are two common ways to get the latest version of this toolkit:
+Project layout (important files):
 
-- Use the prebuilt binary from the GitHub Releases page (recommended for non-developers).
-- Use the source code from this repository (recommended for developers or if you want the latest commits).
+- `main.py` — Application entrypoint; creates `PreservicaClient()` and opens the `MainWindow`.
+- `gui/` — PyQt6 tabs and widgets: `browser_tab.py`, `export_tab.py`, `inventory_tab.py`, `update_tab.py`, `move_tab.py`, `main_window.py`.
+- `backend/` — API and metadata helpers:
+  - `preservica_client.py` — wrapper around `pyPreservica.EntityAPI` and credential caching.
+  - `metadata_diff.py` — CSV parsing and QDC XML parsing; used to compute diffs.
+  - `metadata_updater.py` — builds QDC / custom-schema XML and calls `client.add_metadata` / `update_metadata`.
+  - `metadata_utils.py` and `export_utils.py` — helpers used across flows.
+- `logic/` — export and higher-level operations (e.g., building headers for Excel export).
 
-If you already have a local clone of this repository, you do NOT need to delete and re-download the whole repo — a simple `git pull` will bring you up to date.
+Key runtime details:
 
-Below are step-by-step instructions for both workflows.
+- Credentials are saved to: `%USERPROFILE%\\.preservica_toolkit_credentials.json` (Windows path). Remove this file or use the app **Log Out** action to clear cached credentials.
+- The app uses `pyPreservica` for all API calls; many helper functions expect `Entity` objects rather than raw references for some operations.
+- Metadata blocks are written as namespaced XML. QDC blocks include an `xsi:schemaLocation` pairing the DC namespace with the QDC XSD to improve server validation acceptance.
 
-1) Quick (non-developer) — Download the latest release executable
-
-- Go to the Releases page: https://github.com/ethan-rico/USUpreservica-toolkit/releases
-- Download `USUpreservicaToolkit.exe` for Windows and run it. This is the easiest option for most users.
-
-2) Developer / Source workflow — Clone & pull the repo (Windows `cmd.exe` examples)
-
-- Clone the repo (first time):
+Dependencies and running from source (Windows examples):
 
 ```cmd
-git clone https://github.com/ethan-rico/USUpreservica-toolkit.git
+git clone <repo>
 cd USUpreservica-toolkit
-```
-
-- Update an existing clone (pull latest changes):
-
-```cmd
-cd \path\to\USUpreservica-toolkit
-git checkout main
-git pull origin main
-```
-
-- Create and activate a virtual environment, install dependencies, and run the app:
-
-```cmd
 python -m venv .venv
 .venv\Scripts\activate
-python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 python main.py
 ```
 
-Notes:
-- If your coworkers downloaded a single prebuilt `.exe` from Releases, they should download the new `.exe` for the latest version — they don't need to clone the repo for that.
-- If they used a git clone, `git pull` keeps their working copy up to date. Deleting and re-downloading is not necessary unless they prefer a fresh clone.
+Building a Windows executable (pyinstaller):
 
-3) Pushing changes to GitHub (for the repo owner / maintainers)
-
-If you have local changes you want on GitHub, commit and push them from your clone (Windows `cmd.exe`):
+- There are two spec files in the repo: `USUpeservicaToolkit.spec` and `USUpreservica-toolkit2.1.spec` (pick the one you use for packaging).
+- Typical steps (run from project root):
 
 ```cmd
-cd \path\to\USUpreservica-toolkit
-git status
-git add -A
-git commit -m "Describe the change: add README update and metadata fixes"
-git push origin main
+pip install pyinstaller
+pyinstaller --clean --noconfirm USUpreservicaToolkit.spec
 ```
 
-If you prefer a GUI, GitHub Desktop or other git clients work too.
+After building, upload the built `.exe` to GitHub Releases for non-technical users.
 
-4) Creating a Release (optional)
+---
 
-- Creating a release is a good idea if you want coworkers to download a single `.exe` file. You can create a Release on GitHub (Repository → Releases → Draft a new release), upload the built `.exe`, and publish it.
+## Testing & Troubleshooting
 
-5) Troubleshooting / Preview panel note
+- If you encounter errors after a `git pull`, reinstall dependencies:
 
-- If the Browser Preview panel doesn't render a thumbnail for certain assets (TIFF/PDF), use the **Open** action in the preview to view the full asset externally.
-- If coworkers run into issues after a `git pull`, ask them to run `python -m pip install -r requirements.txt` to pick up any new dependencies.
+```cmd
+python -m pip install -r requirements.txt
+```
 
-If you'd like, I can:
-- prepare a release draft and upload an `.exe` (if you provide the build), or
-- create a small `tools/` script that prints the outgoing metadata XML for a single test asset (dry-run) so you can validate payloads before pushing.
+- To debug metadata issues, use `backend/metadata_diff.py::parse_qdc_xml` and `backend/metadata_updater.py::build_qdc_xml` to inspect how QDC/custom blocks are built.
+
+- If the GUI crashes while exporting inventory, run `python main.py` from a console to see traceback output; ensure the current user has network access to the Preservica server and that credentials are valid.
+
+---
+
+## Support & Next steps I can help with
+
+- Prepare a GitHub Release and upload a built `.exe` for non-technical coworkers.
+- Add a small CLI `tools/inventory_cli.py` to run the inventory export from the command line for automation.
+- Add PDF page-count or large-file handling to the preview (requires `pdf2image` and system `poppler`).
+
+If you'd like me to prepare any of the above (release, CLI tool, packaging), tell me which and I will proceed.
+
 
