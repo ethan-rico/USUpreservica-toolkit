@@ -5,6 +5,7 @@ from gui.browser_tab import BrowserTab
 from gui.export_tab import ExportTab
 from gui.update_tab import UpdateTab
 from gui.move_tab import MoveTab
+from gui.inventory_tab import InventoryTab
 
 class MainWindow(QMainWindow):
     def __init__(self, client):
@@ -12,12 +13,14 @@ class MainWindow(QMainWindow):
 
         self.export_tab = ExportTab(client)
         self.move_tab = MoveTab(client)
+        self.inventory_tab = InventoryTab(client)
         self.browser_tab = BrowserTab(self.export_tab, self.move_tab, client)
         self.update_tab = UpdateTab(client)
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.browser_tab, "Browser")
         self.tabs.addTab(self.export_tab, "Export")
+        self.tabs.addTab(self.inventory_tab, "Inventory")
         self.tabs.addTab(self.move_tab, "Move")
         self.tabs.addTab(self.update_tab, "Update")
 
