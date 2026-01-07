@@ -119,99 +119,149 @@ class InventoryWorker(QThread):
                 # Couldn't use descendants; we'll stream recursively without a known total
                 total = None
 
-            self.status.emit("Writing CSV...")
-            with open(self.out_path, 'w', newline='', encoding='utf-8') as csvfile:
-                writer = csv.writer(csvfile)
-                writer.writerow(['reference', 'dc:title', 'dcterms:identifier', 'dc:identifier', 'filename'])
 
-                count = 0
+            self.status.emit("Collecting inventory metadata...")
 
-                if asset_refs is not None:
-                    # Determinate mode
-                    for i, ref in enumerate(asset_refs, 1):
+            rows = []
+            count = 0
+
+            def extract_values(meta: dict, prefix: str):
+                vals = []
+                # keys like 'dc:title', 'dc:title.1', ... order by suffix
+                i = 0
+                while True:
+                    key = f"{prefix}" if i == 0 else f"{prefix}.{i}"
+                    if key in meta:
+                        vals.append(meta.get(key, ""))
+                        i += 1
+                    else:
+                        break
+                return vals
+
+            def extract_filenames(entity_ref, entity_obj):
+                names = []
+                # try direct attributes first
+                fname = getattr(entity_obj, 'file_name', None) or getattr(entity_obj, 'filename', None)
+                if fname:
+                    names.append(fname)
+                # then try bitstreams
+                try:
+                    bstreams = self.client.bitstreams_for_asset(entity_ref)
+                    for bs in bstreams:
+                        name = getattr(bs, 'filename', None) or getattr(bs, 'name', None)
+                        if name and name not in names:
+                            names.append(name)
+                except Exception:
+                    pass
+                return names
+
+            # helper to process an asset-like object and append to rows
+            def process_asset(ref, entity):
+                nonlocal count
+                try:
+                    qdc_xml, meta = fetch_current_metadata(self.client, ref)
+                except Exception:
+                    qdc_xml, meta = ('', {})
+
+                dc_titles = extract_values(meta, 'dc:title')
+                dcterms_titles = extract_values(meta, 'dcterms:title')
+                dc_ids = extract_values(meta, 'dc:identifier')
+                dcterms_ids = extract_values(meta, 'dcterms:identifier')
+                filenames = extract_filenames(ref, entity)
+
+                rows.append({
+                    'reference': ref,
+                    'dc_titles': dc_titles,
+                    'dcterms_titles': dcterms_titles,
+                    'dc_identifiers': dc_ids,
+                    'dcterms_identifiers': dcterms_ids,
+                    'filenames': filenames,
+                    'title_attr': getattr(entity, 'title', '')
+                })
+                count += 1
+
+            if asset_refs is not None:
+                # determinate mode
+                total_refs = len(asset_refs)
+                for i, ref in enumerate(asset_refs, 1):
+                    try:
                         try:
-                            try:
-                                entity = self.client.asset(ref)
-                            except Exception:
-                                # skip if not asset
-                                continue
+                            entity = self.client.asset(ref)
+                        except Exception:
+                            continue
+                        process_asset(ref, entity)
+                        self.progress.emit(int(i / total_refs * 100))
+                    except Exception:
+                        continue
+            else:
+                # indeterminate mode: traverse recursively
+                def process_folder(ref):
+                    try:
+                        children = self.client.children(ref)
+                    except Exception:
+                        return
 
-                            qdc_xml, meta = fetch_current_metadata(self.client, ref)
-
-                            dcterms_id = ''
-                            dc_id = ''
-                            for k, v in meta.items():
-                                if k.startswith('dcterms:identifier') and not dcterms_id:
-                                    dcterms_id = v
-                                if k.startswith('dc:identifier') and not dc_id:
-                                    dc_id = v
-
-                            filename = getattr(entity, 'file_name', '') or getattr(entity, 'filename', '') or ''
-                            if not filename:
-                                try:
-                                    bstreams = self.client.bitstreams_for_asset(ref)
-                                    for bs in bstreams:
-                                        name = getattr(bs, 'filename', None) or getattr(bs, 'name', None)
-                                        if name:
-                                            filename = name
-                                            break
-                                except Exception:
-                                    pass
-
-                            writer.writerow([ref, getattr(entity, 'title', ''), dcterms_id, dc_id, filename])
-                            count += 1
-                            self.progress.emit(int(i / total * 100))
+                    for child in getattr(children, 'results', []) or []:
+                        try:
+                            if isinstance(child, pyp.Folder):
+                                process_folder(child.reference)
+                            else:
+                                cr = child.reference
+                                process_asset(cr, child)
+                                if count % 100 == 0:
+                                    self.status.emit(f"Collected {count} items...")
                         except Exception:
                             continue
 
-                else:
-                    # Indeterminate mode: traverse children recursively and emit no percentage
-                    def process_folder(ref):
-                        nonlocal count
-                        try:
-                            children = self.client.children(ref)
-                        except Exception:
-                            return
+                process_folder(self.root_ref)
 
-                        for child in getattr(children, 'results', []) or []:
-                            try:
-                                if isinstance(child, pyp.Folder):
-                                    process_folder(child.reference)
-                                else:
-                                    cr = child.reference
-                                    try:
-                                        qdc_xml, meta = fetch_current_metadata(self.client, cr)
-                                    except Exception:
-                                        qdc_xml, meta = ('', {})
+            # compute maximum counts for each group to build header
+            max_dc_titles = max((len(r['dc_titles']) for r in rows), default=0)
+            max_dcterms_titles = max((len(r['dcterms_titles']) for r in rows), default=0)
+            max_dc_ids = max((len(r['dc_identifiers']) for r in rows), default=0)
+            max_dcterms_ids = max((len(r['dcterms_identifiers']) for r in rows), default=0)
+            max_fnames = max((len(r['filenames']) for r in rows), default=0)
 
-                                    dcterms_id = ''
-                                    dc_id = ''
-                                    for k, v in meta.items():
-                                        if k.startswith('dcterms:identifier') and not dcterms_id:
-                                            dcterms_id = v
-                                        if k.startswith('dc:identifier') and not dc_id:
-                                            dc_id = v
+            # build header
+            header = ['reference']
+            # include attribute title (fallback) and then dc/dcterms titles
+            header.append('title')
+            for i in range(max_dc_titles):
+                header.append('dc:title' if i == 0 else f'dc:title.{i}')
+            for i in range(max_dcterms_titles):
+                header.append('dcterms:title' if i == 0 else f'dcterms:title.{i}')
+            for i in range(max_dc_ids):
+                header.append('dc:identifier' if i == 0 else f'dc:identifier.{i}')
+            for i in range(max_dcterms_ids):
+                header.append('dcterms:identifier' if i == 0 else f'dcterms:identifier.{i}')
+            for i in range(max_fnames):
+                header.append('filename' if i == 0 else f'filename.{i}')
 
-                                    filename = getattr(child, 'file_name', '') or getattr(child, 'filename', '') or ''
-                                    if not filename:
-                                        try:
-                                            bstreams = self.client.bitstreams_for_asset(cr)
-                                            for bs in bstreams:
-                                                name = getattr(bs, 'filename', None) or getattr(bs, 'name', None)
-                                                if name:
-                                                    filename = name
-                                                    break
-                                        except Exception:
-                                            pass
+            # write CSV
+            self.status.emit('Writing CSV...')
+            with open(self.out_path, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow(header)
 
-                                    writer.writerow([cr, getattr(child, 'title', ''), dcterms_id, dc_id, filename])
-                                    count += 1
-                                    if count % 100 == 0:
-                                        self.status.emit(f"Exported {count} items...")
-                            except Exception:
-                                continue
+                for r in rows:
+                    row = [r['reference'], r.get('title_attr', '')]
+                    # dc titles
+                    for i in range(max_dc_titles):
+                        row.append(r['dc_titles'][i] if i < len(r['dc_titles']) else '')
+                    # dcterms titles
+                    for i in range(max_dcterms_titles):
+                        row.append(r['dcterms_titles'][i] if i < len(r['dcterms_titles']) else '')
+                    # dc identifiers
+                    for i in range(max_dc_ids):
+                        row.append(r['dc_identifiers'][i] if i < len(r['dc_identifiers']) else '')
+                    # dcterms identifiers
+                    for i in range(max_dcterms_ids):
+                        row.append(r['dcterms_identifiers'][i] if i < len(r['dcterms_identifiers']) else '')
+                    # filenames
+                    for i in range(max_fnames):
+                        row.append(r['filenames'][i] if i < len(r['filenames']) else '')
 
-                    process_folder(self.root_ref)
+                    writer.writerow(row)
 
             self.finished.emit(self.out_path)
             self.status.emit(f"Export complete: {count} items written to {self.out_path}")
